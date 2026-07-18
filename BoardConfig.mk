@@ -1,7 +1,5 @@
 DEVICE_PATH := device/fortuneship/ums91581h10
 
-BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE := $(BOARD_BOOTIMAGE_PARTITION_SIZE)
-
 # For building with minimal manifest
 ALLOW_MISSING_DEPENDENCIES := true
 
