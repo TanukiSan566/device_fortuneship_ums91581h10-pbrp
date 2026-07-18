@@ -1,0 +1,248 @@
+# SPDX-FileCopyrightText: 2016-2023 Unisoc (Shanghai) Technologies Co., Ltd
+# SPDX-License-Identifier: LicenseRef-Unisoc-General-1.0
+
+#
+## Please include it in /init.recovery.${ro.hardware}.rc
+#
+
+service healthd /system/bin/healthd -r
+    critical
+    seclabel u:r:healthd:s0
+
+service create_splloader_dual_slot_byname_path /system/bin/create_splloader_dual_slot_byname_path.sh
+    user root
+    group root system
+    disabled
+    oneshot
+    seclabel u:r:create_spl_link_recovery:s0
+
+service vendor.mlogservice /vendor/bin/mlogservice
+    class main
+    user shell
+    group system root
+
+
+on early-init
+    # [源码级修复 1/4 - 冷启动/data挂载竞争]
+    # 实测：音量+电源键冷启动（尤其关机后）走硬件按键组合进TWRP时，/data会被
+    # 第一阶段init提前挂载一次，TWRP自己随后想卸载重挂（为了正确处理FBE/绑定
+    # /data/media到/sdcard）时，卸载失败（Device or resource busy），导致只能
+    # 将就用第一次那个"半成品"挂载状态——表现为内部存储/MTP显示0MB、语言设置
+    # 读不到回退英文。这里在ramdisk里最早会跑到的触发点，抢先把可能已经存在的
+    # /data挂载卸掉，让TWRP自己后面挂载的时候不会撞上"设备忙"。多次真机测试
+    # 确认有效，冷启动不再复现该问题。
+    umount /data
+
+    # [源码级修复 2/4 - ConfigFS创建时机]
+    # 这段以前在"on init"里，跟init.recovery.usb.rc自己"on init"块（做mtp
+    # functionfs挂载）到底谁先谁后，取决于两个rc文件的解析/导入顺序，不保证。
+    # 一旦init.recovery.usb.rc那边先跑，会在/config还没挂载成型、functions目录
+    # 还没建好的时候就去mount functionfs，导致"mount() failed: No such device"，
+    # 底层UDC永远卡在"waiting musb udc start"死循环，USB连D+上拉都没有，主机端
+    # 设备管理器完全没反应。挪到on early-init，Android init保证它一定先于任何
+    # 文件的on init触发，从根上消除这个时序竞争。
+    #
+    # Create mount-point for ConfigFS USB gadgets
+    # Add standard gadget entries
+    mount configfs none /config
+    mkdir /config/usb_gadget/g1 0770 shell shell
+    write /config/usb_gadget/g1/idVendor 0x1782
+    write /config/usb_gadget/g1/idProduct 0x4d00
+    mkdir /config/usb_gadget/g1/strings/0x409 0770 shell shell
+    write /config/usb_gadget/g1/strings/0x409/serialnumber ${ro.serialno}
+    write /config/usb_gadget/g1/strings/0x409/manufacturer Unisoc
+    write /config/usb_gadget/g1/strings/0x409/product "Unisoc Phone"
+    mkdir /config/usb_gadget/g1/configs/b.1 0770 shell shell
+    mkdir /config/usb_gadget/g1/configs/b.1/strings/0x409 0770 shell shell
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "Conf 1"
+    write /config/usb_gadget/g1/configs/b.1/MaxPower 120
+
+    # Create adb+ffs gadget function
+    mkdir /config/usb_gadget/g1/functions/ffs.adb 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/ffs.fastboot 0770 shell shell
+    mkdir /dev/usb-ffs 0770 shell shell
+    mkdir /dev/usb-ffs/adb 0770 shell shell
+    mount functionfs adb /dev/usb-ffs/adb uid=2000,gid=2000
+    mkdir /dev/usb-ffs/fastboot 0770 system system
+    mount functionfs fastboot /dev/usb-ffs/fastboot rmode=0770,fmode=0660,uid=1000,gid=1000
+
+    # Create MTP and PTP functions (Updated for Userspace MTP ffs.mtp)
+    mkdir /config/usb_gadget/g1/functions/ffs.mtp 0770 shell shell
+    mkdir /dev/usb-ffs/mtp 0770 root root
+    mount functionfs mtp /dev/usb-ffs/mtp rmode=0770,fmode=0660,uid=0,gid=0,no_disconnect=1
+
+    mkdir /config/usb_gadget/g1/functions/ptp.gs1 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/rndis.gs4 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/vser.gs7 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/accessory.gs2 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/audio_source.gs3 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/midi.gs5 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs0 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs1 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs2 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs3 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs4 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs5 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs6 0770 shell shell
+    mkdir /config/usb_gadget/g1/functions/sprdgser.gs7 0770 shell shell
+
+    # [源码级修复 3/4 - sys.usb.configfs时机]
+    # 原来这个属性是在"on boot"阶段才设成1，但TWRP这种精简recovery根本跑不到
+    # "on boot"（那是完整系统开机流程接近结束才会触发的阶段），导致这个属性
+    # 永远停留在默认值0，所有配置gadget、往UDC写入控制器名启动USB的语句全部
+    # 不会执行。这里提前到recovery真正会跑到的on early-init。
+    setprop sys.usb.configfs 1
+
+    # [源码级修复 4/4 - 开机自动MTP+ADB]
+    # persist.sys.usb.config默认值实际上在system.prop/vendor.prop的层层build.prop
+    # 拼接过程中，会被AOSP官方打包工具自动追加的安全默认值"none"覆盖掉（这是
+    # 标准AOSP行为，真机开机时本该被/data里持久化的真实值覆盖回去，但recovery下
+    # 没有这个覆盖过程）。不主动设置的话，每次开机都要手动进设置点一次Enable
+    # MTP才会生效。这里直接强制默认为mtp+adb组合模式。
+    setprop persist.sys.usb.config mtp,adb
+    setprop sys.usb.config mtp,adb
+
+on init
+    # Apply strict SELinux checking of PROT_EXEC on mmap/mprotect calls.
+    write /sys/fs/selinux/checkreqprot 0
+    start healthd
+    start create_splloader_dual_slot_byname_path
+
+    export PATH /sbin:/system/bin:/vendor/bin
+    export SECONDARY_STORAGE /storage/sdcard0
+
+    mkdir /storage
+    mkdir /storage/sdcard1
+    mkdir /storage/sdcard0
+    symlink /storage/sdcard0 /mnt/sdcard
+    symlink /system/etc/bluetooth /etc/bluetooth
+
+    mkdir /systeminfo 0777 system system
+
+    loglevel 7
+
+    chown system root /proc/mdbg/assert
+    chown system root /proc/mdbg/wdtirq
+    chown system root /proc/mdbg/at_cmd
+    chown system root /proc/mdbg/loopcheck
+
+    chmod 760 /proc/mdbg/assert
+    chmod 760 /proc/mdbg/wdtirq
+    chmod 760 /proc/mdbg/at_cmd
+    chmod 760 /proc/mdbg/loopcheck
+
+    chown system root /proc/cpwcn/wdtirq
+    chmod 766 /proc/cpwcn/wdtirq
+
+    # ConfigFS USB gadget的创建工作已经挪到上面的"on early-init"块里了（原因
+    # 见那边的注释），这里不再重复。
+
+on boot
+    setprop sys.usb.configfs 1
+    write /sys/block/mmcblk0boot0/force_ro 0
+    write /sys/block/mmcblk0boot1/force_ro 0
+
+    chmod 660 /sys/class/power_supply/battery/charger.0/stop_charge
+    chmod 660 /sys/class/power_supply/battery/charger.0/jeita_control
+    chmod 660 /sys/class/power_supply/battery/input_current_limit
+    chmod 660 /sys/class/power_supply/battery/constant_charge_current
+    chmod 660 /sys/class/power_supply/battery/charger.0/keep_awake
+
+on fs
+    #mkdir /data/misc/bluedroid 0770 bluetooth net_bt_stack
+    mkdir /data/misc/bluetooth 0770 system system
+
+on post-fs-data
+    # We chown/chmod /data again so because mount is run as root + defaults
+    chown system system /data
+    chmod 0771 /data
+    # We restorecon /data in case the userdata partition has been reset.
+    restorecon /data
+    mkdir /data/misc 01771 system misc
+    #mkdir /data/misc/bluedroid 0770 bluetooth net_bt_stack
+    mkdir /data/misc/bluetooth 0770 system system
+    copy /system/etc/bluetooth/bt_stack.conf /data/misc/bluedroid/bt_stack.conf
+    chown bluetooth system /data/misc/bluedroid/bt_stack.conf
+    chmod 0640 /data/misc/bluedroid/bt_stack.conf
+
+    #add wifi
+    mkdir /data/vendor/wifi 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa 0770 wifi wifi
+    mkdir /data/vendor/wifi/wpa/sockets 0770 wifi wifi
+    mkdir /data/system 0770 system system
+    mkdir /etc/wifi 0770 wifi wifi
+    write /data/vendor/wifi/fwpath sta_mode
+    chmod 660 /data/vendor/wifi/fwpath
+    chown wifi wifi /data/vendor/wifi/fwpath
+    rmdir /data/system/wpa_supplicant
+    mkdir /data/misc/dhcp 0770 dhcp dhcp
+
+    #to observe dnsmasq.leases file for dhcp information
+    chown dhcp system /data/misc/dhcp
+    setprop wifi.interface wlan0
+    mkdir /data/misc/dhcp6c 0770 dhcp dhcp
+    chown dhcp system /data/misc/dhcp6c
+
+    # Ylog dir on /data partition
+    mkdir /data/vendor 0751 root root
+    mkdir /data/vendor/local 0751 root root
+
+    # slogmodem config dir
+    mkdir /data/vendor/ylog 0770 shell system
+    mkdir /data/vendor/local/slogmodem 0770 shell system
+    mkdir /data/vendor/local/mlogservice 0770 shell system
+    mkdir /mnt/vendor/productinfo 0771 system root
+    mkdir /data/vendor/local/otpdata 0777 system root
+
+on property:ro.debuggable=1
+    write /sys/module/smsg/parameters/debug_enable 1
+
+on property:ro.bootmode=recovery
+    class_start recovery
+
+on property:sys.usb.configfs=1 && property:sys.usb.ffs.ready=1 && property:sys.usb.config=adb,vser,gser
+    write /config/usb_gadget/g1/idVendor 0x1782
+    write /config/usb_gadget/g1/idProduct 0x5d06
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "adb_vser_gser"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    rm /config/usb_gadget/g1/configs/b.1/f3
+    rm /config/usb_gadget/g1/configs/b.1/f4
+    rm /config/usb_gadget/g1/configs/b.1/f5
+    rm /config/usb_gadget/g1/configs/b.1/f6
+    rm /config/usb_gadget/g1/configs/b.1/f7
+    rm /config/usb_gadget/g1/configs/b.1/f8
+    rm /config/usb_gadget/g1/configs/b.1/f9
+    rm /config/usb_gadget/g1/configs/b.1/f10
+    rm /config/usb_gadget/g1/configs/b.1/f11
+
+    symlink /config/usb_gadget/g1/functions/ffs.adb  /config/usb_gadget/g1/configs/b.1/f1
+    symlink /config/usb_gadget/g1/functions/vser.gs7 /config/usb_gadget/g1/configs/b.1/f2
+    symlink /config/usb_gadget/g1/functions/sprdgser.gs0 /config/usb_gadget/g1/configs/b.1/f3
+
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:sys.usb.configfs=1 && property:sys.usb.config=vser
+    write /config/usb_gadget/g1/idVendor 0x1782
+    write /config/usb_gadget/g1/idProduct 0x4d00
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "vser"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    rm /config/usb_gadget/g1/configs/b.1/f3
+    rm /config/usb_gadget/g1/configs/b.1/f4
+    rm /config/usb_gadget/g1/configs/b.1/f5
+    rm /config/usb_gadget/g1/configs/b.1/f6
+    rm /config/usb_gadget/g1/configs/b.1/f7
+    rm /config/usb_gadget/g1/configs/b.1/f8
+    rm /config/usb_gadget/g1/configs/b.1/f9
+    rm /config/usb_gadget/g1/configs/b.1/f10
+    rm /config/usb_gadget/g1/configs/b.1/f11
+
+    symlink /config/usb_gadget/g1/functions/vser.gs7 /config/usb_gadget/g1/configs/b.1/f1
+
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:ro.bootmode=factorytest && property:ro.debuggable=0
+    setprop sys.usb.config vser

@@ -1,0 +1,74 @@
+# [源码级修复说明]
+#
+# 1. 原来这里有一段"on init"，做mkdir ffs.mtp + mount functionfs mtp，是
+#    重复的——init.recovery.common.rc的on early-init阶段已经统一创建并挂载好
+#    了所有function（包括ffs.mtp）。这个重复块已删除，原因见common.rc里的
+#    详细注释：两边同时做，谁先谁后不保证，先跑的那边如果在/config还没挂载
+#    成型时就去mount functionfs，会直接报"No such device"，底层USB控制器
+#    永远卡在等待状态，主机端完全识别不到设备。
+#
+# 2. 下面plain "adb"模式（sys.usb.config=adb && sys.usb.ffs.ready=1）绑定
+#    UDC那个块被禁用了：这台设备recovery会把/system/etc/init/hw/init.rc这份
+#    标准系统init.rc也一起跑进来（Android 12+通用USB gadget切换逻辑自带在
+#    里面），它自己就有一份完整、正确的plain adb处理逻辑。同时启用两份会在
+#    同一个属性变化上抢着unbind/bind UDC，实测5秒内"gadget D+ pullup on/off"
+#    能反复横跳180次，主机端USB控制器完全没机会识别到稳定连接。
+#    "mtp"和"mtp,adb"这两个模式，标准系统init.rc完全没有对应实现（只处理了
+#    plain adb），所以这两个块不存在重复冲突问题，继续保留。
+#
+# 3. idProduct修复：mtp单独模式和mtp,adb组合模式，原来都被写成了0xd001——这其实
+#    是Google官方规定的"纯ADB单功能设备"专属PID。Windows是靠idVendor:idProduct
+#    这对组合去匹配驱动的，看到18d1:d001就只会按纯ADB设备处理，完全不会去找/装
+#    MTP相关的驱动（WPD/便携设备），哪怕USB描述符里实际上确实还有一个MTP接口
+#    存在也没用。Google官方规定：MTP单独=0x4EE0，MTP+ADB=0x4EE1，纯ADB=0xd001。
+#    下面已经改成正确的值。
+
+on property:sys.usb.config=none
+    write /config/usb_gadget/g1/UDC none
+
+on property:sys.usb.config=mtp
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    rm /config/usb_gadget/g1/configs/b.1/f3
+    write /config/usb_gadget/g1/idVendor 0x18d1
+    write /config/usb_gadget/g1/idProduct 0x4ee0
+    # 已将 mtp.gs0 替换为 ffs.mtp
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:sys.usb.config=mtp,adb
+    start adbd
+
+on property:sys.usb.ffs.ready=1 && property:sys.usb.config=mtp,adb
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp_adb"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    rm /config/usb_gadget/g1/configs/b.1/f3
+    write /config/usb_gadget/g1/idVendor 0x18d1
+    write /config/usb_gadget/g1/idProduct 0x4ee1
+    # 已将 mtp.gs0 替换为 ffs.mtp
+    symlink /config/usb_gadget/g1/functions/ffs.mtp /config/usb_gadget/g1/configs/b.1/f1
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+on property:sys.usb.config=adb
+    start adbd
+
+# 下面这个块（plain adb 的 UDC 绑定流程）保持禁用状态，原因见文件开头注释。
+#
+# on property:sys.usb.ffs.ready=1 && property:sys.usb.config=adb
+#     write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "adb"
+#     rm /config/usb_gadget/g1/configs/b.1/f1
+#     rm /config/usb_gadget/g1/configs/b.1/f2
+#     rm /config/usb_gadget/g1/configs/b.1/f3
+#     write /config/usb_gadget/g1/idVendor 0x18d1
+#     write /config/usb_gadget/g1/idProduct 0xd001
+#     symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1
+#     write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+#     setprop sys.usb.state ${sys.usb.config}
+
+# fastbootd 由 TWRP 自身在切换模式时直接操作 /config/usb_gadget，只要 UDC 名字
+# （sys.usb.controller = musb-hdrc.1.auto）和上面这套 functions 目录存在即可，无需额外处理。
