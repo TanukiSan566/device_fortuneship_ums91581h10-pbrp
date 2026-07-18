@@ -9,3 +9,15 @@ vendor_dlkm /vendor_dlkm erofs ro wait,avb=vbmeta_system_ext,logical,first_stage
 system_dlkm /system_dlkm erofs ro wait,avb=vbmeta_system_ext,logical,first_stage_mount,slotselect
 /dev/block/by-name/metadata /metadata f2fs nodev,noatime,nosuid wait,formattable,first_stage_mount,check
 /dev/block/by-name/metadata /metadata ext4 nodev,noatime,nosuid,errors=panic wait,formattable,first_stage_mount,check
+# [源码级修复 - misc/BCB自愈] 补上被makefile自动生成漏掉的misc分区行。
+# 这个first_stage_ramdisk下的fstab跟TWRP自己的system/etc/recovery.fstab是
+# 两份完全独立的东西：TWRP自己那份一直有/misc、Backup页面认得到，但recovery
+# 二进制里链接的libbootloader_message.so走的是fs_mgr标准查找机制，只认这份
+# first_stage_ramdisk下的fstab——这里没有misc这一行，clear_bootloader_message()
+# 就找不到misc块设备，写入/清除BCB失败。实测复现链条：点"重启到
+# 系统/bootloader/fastboot"任意一个 -> recovery保存设置后必现libc++abi
+# terminate/SIGABRT(被init重新拉起，卡在recovery里)-> 因为清BCB这一步没跑
+# 完，之前进recovery时写进misc的"boot-recovery"标记永远留着 -> 展锐splloader
+# 每次开机都因为detect到misc里的recovery消息，无视你实际请求的目标，直接送回
+# recovery。这也是"重启到任何模式最后都跳回twrp"的根因。
+/dev/block/by-name/misc /misc emmc defaults defaults

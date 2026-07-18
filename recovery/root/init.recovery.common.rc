@@ -246,3 +246,21 @@ on property:sys.usb.configfs=1 && property:sys.usb.config=vser
 
 on property:ro.bootmode=factorytest && property:ro.debuggable=0
     setprop sys.usb.config vser
+
+# [源码级修复 - misc/BCB自愈兜底] 配合 first_stage_ramdisk/fstab.* 里补上的
+# misc行一起用。修复fstab后clear_bootloader_message()理论上就能正常找到misc
+# 分区了，但这三条trigger作为独立于recovery进程的兜底手段继续保留：万一
+# recovery那次"保存设置后崩溃"的问题还有其它触发因素（fstab之外的），
+# init自己的property trigger机制不依赖recovery进程死活，在sys.powerctl被设成
+# 这三个"离开recovery"目标的瞬间独立地把misc开头4KB清零。故意不处理
+# reboot,recovery这个目标，避免破坏重新进recovery/fastbootd菜单识别用到的
+# BCB内容。已知局限：和init内置的HandlePowerctlMessage不在同一条队列上，
+# 存在时序竞争，需要真机验证是否每次都能抢在实际重启前完成。
+on property:sys.powerctl=reboot,fastboot
+    exec - root -- /system/bin/toybox dd if=/dev/zero of=/dev/block/by-name/misc bs=4096 count=1 conv=fsync
+
+on property:sys.powerctl=reboot,bootloader
+    exec - root -- /system/bin/toybox dd if=/dev/zero of=/dev/block/by-name/misc bs=4096 count=1 conv=fsync
+
+on property:sys.powerctl=reboot,
+    exec - root -- /system/bin/toybox dd if=/dev/zero of=/dev/block/by-name/misc bs=4096 count=1 conv=fsync
