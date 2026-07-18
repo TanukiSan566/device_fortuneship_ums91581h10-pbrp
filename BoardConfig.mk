@@ -53,22 +53,22 @@ DEVICE_PATH := device/fortuneship/ums91581h10
 # PLATFORM 分段（fragments/platform/）是否有六百多个真实 vendor 文件，而不是
 # 二十来个 first_stage_ramdisk 骨架。如果这次还是不行，退回用 GitHub Action
 # 的 Graft workflow 编译后处理，那条路已确认 100% 可靠。
-BOARD_VENDOR_RAMDISK_FRAGMENTS := platform
-# [2026-07-18 更新 - 发现并修复了严重问题] 之前的 prebuilt/vendor_ramdisk_platform.lz4
-# 根本就是错的文件！实测解包发现：那个文件解压后有 217MB，而已经验证跟正常
-# 能用的参考机型逐字节相同（MD5一致）的正确内容，压缩后只有 38,110,869 字节，
-# 而且压缩格式实际是 zstd（魔数 28 B5 2F FD），并不是文件名后缀写的 lz4
-# （魔数应该是 02 21 4C 18）。这个错误文件被塞进 vendor_boot 后，编译产物
-# vendor_boot.img 体积暴涨到 154MB，超过 BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE
-# 100MB 的限制，编译到最后一步（mkbootimg 打包）才报错，之前那么多次编译
-# "看起来" 都没报错，其实每次用的都是这份体积超标的错误文件，只是因为加上
-# RECOVERY 段之前，PLATFORM 段自己还没有大到直接触发报错而已。
+# [2026-07-18 二次更正 - 之前的"修复"是错的，现在改回真·原厂内容]
+# 上一版发现"这个文件解压有217MB"就以为它是错的，换成了另一份38MB的参考文件。
+# 但这次你直接给了原厂 vendor_boot.img，解包一看：原厂那颗 vendor_boot 分区
+# 100MB 几乎全部被这单独一个 PLATFORM 段（80,668,385 字节）占满，
+# entry_num=1，压根没有 RECOVERY 段（因为原厂不需要）。逐字节比对后，
+# 这个 80,668,385 字节的内容跟你最早那份设备树里的 vendor_ramdisk_platform.lz4
+# 是完全一样的（MD5一致）——也就是说那份文件从一开始就是对的、就是原厂真实
+# 内容，我上一版换成的38MB那份反而是来路不明、内容被精简过的版本（大概率是
+# 别的场景下手工裁剪过，只留了保证能开机的最小子集，不是真原厂全量）。
 #
-# 现在已经换成从你之前验证过、真实设备正常使用的 vendor_boot 里逐字节提取
-# 出来的正确内容（38,110,869 字节，zstd 压缩），文件也相应改名成 .zstd
-# 后缀。不需要改 BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE ——这份正确内容加上
-# RECOVERY 段，总大小远小于100MB这个限制，不用去扩分区。
-BOARD_VENDOR_RAMDISK_FRAGMENT.platform.PREBUILT := $(DEVICE_PATH)/prebuilt/vendor_ramdisk_platform.zstd
+# 现在改回了这份经过原厂固件逐字节验证的正确内容。这也是为什么这次编译会
+# 死死顶在vendor_boot分区100MB上限——原厂自己就用了80.6MB，只给RECOVERY段
+# 留了不到20MB空间，这个空间必须靠精简TWRP/PBRP自己那部分内容（下面kernel
+# 模块精简那段）来腾出来，不能反过来动PLATFORM段。
+BOARD_VENDOR_RAMDISK_FRAGMENTS := platform
+BOARD_VENDOR_RAMDISK_FRAGMENT.platform.PREBUILT := $(DEVICE_PATH)/prebuilt/vendor_ramdisk_platform.lz4
 BOARD_VENDOR_RAMDISK_FRAGMENT.platform.MKBOOTIMG_ARGS := --ramdisk_type PLATFORM
 # ============================================================================
 
@@ -173,7 +173,10 @@ PLATFORM_VERSION := 16.1.0
 
 # TWRP Configuration
 TW_THEME := portrait_hdpi
-TW_EXTRA_LANGUAGES := true
+TW_EXTRA_LANGUAGES := false
+# ↑ [2026-07-18 关闭以省空间] 原来是true，会打包一堆语言包字体资源。只留mtp/
+# fastbootd/adb这几个核心功能不需要多语言UI，先关掉腾地方，TWRP默认只用
+# 英文界面，不影响adb/mtp/fastbootd这几个功能本身的可用性。
 #TW_SCREEN_BLANK_ON_BOOT := true
 TW_INPUT_BLACKLIST := "hbtp_vm"
 TW_USE_TOOLBOX := true
@@ -209,6 +212,31 @@ ifeq ($(BOARD_BOOT_HEADER_VERSION),4)
 	BOARD_INCLUDE_RECOVERY_RAMDISK_IN_VENDOR_BOOT := true 
 endif
 TW_LOAD_VENDOR_BOOT_MODULES := true
+# ============================================================================
+# [2026-07-18 精简说明] 你给的原厂vendor_boot.img解包后发现：PLATFORM段单独
+# 就占了80.6MB（entry_num=1，原厂自己都不留RECOVERY段），也就是说100MB分区
+# 里留给TWRP/PBRP自己（RECOVERY段）的压缩后预算只有大约19MB，这是硬性物理
+# 限制——分区大小是GPT里刻死的，改不了，之前那版报错118MB也已经确认过
+# BOARD_VENDOR_BOOTIMAGE_PARTITION_SIZE不能瞎调大，调大了刷不进真机分区表。
+#
+# recovery/root/lib/modules 原来158个.ko文件、解压168MB，是体积大头。已经按
+# "只保留mtp/fastbootd/adb+基础UI/存储/电源需要的驱动"的原则删了一轮，删除
+# 前用 modinfo depends= 字段做了依赖链检查（发现比如显示驱动sprd-drm.ko
+# 意外依赖trusty/trusty-ipc/apsys-dvfs，USB PHY驱动musb_sprd.ko依赖
+# sc27xx_typec，这几个虽然名字看着像"TEE安全"/"快充"功能，实际是显示和USB
+# 能正常工作的硬依赖，已经保留），删掉的主要是：摄像头、音频、传感器/指纹、
+# 基带modem通信(sipa/sipc/sblock等)、性能调度器扩展、部分调试模块、非核心
+# 快充管理这几大类，跟mtp/fastbootd/adb和基础UI/存储/开关机都没有关系。
+# 精简后 recovery/root 从原来168MB(仅模块)降到73MB(全部内容)。
+#
+# 另外上面的FBE解密相关配置（TW_INCLUDE_CRYPTO那一块）和额外语言包
+# （TW_EXTRA_LANGUAGES）也先关掉腾地方，具体原因看各自那段注释。
+#
+# 压缩后能不能真的塞进~19MB预算，得实测这次编译才知道（zstd对.ko这种内容
+# 压缩率通常不错，但没法在这边模拟真实mkbootimg+zstd的完整流程精确算出最终
+# 字节数）。如果这次还是超，下一步可以考虑的方向：TW_USE_TOOLBOX相关的
+# busybox/toolbox体积、recovery自带的PNG主题资源。
+# ============================================================================
 TW_INCLUDE_FASTBOOTD := true
 TARGET_SCREEN_WIDTH := 320
 TARGET_SCREEN_HEIGHT := 480
@@ -238,23 +266,19 @@ TW_EXCLUDE_DEFAULT_USB_INIT := true
 #   android_device_xiaomi_lavender-pbrp (android-12.1, QCOM, vendor/twrp)
 # 两份树用的宏不完全一样（跟具体平台的解密辅助工具有没有关系），取两边都在
 # 用、跟平台无关的通用部分：
-TW_INCLUDE_CRYPTO := true
-TW_INCLUDE_CRYPTO_FBE := true
-TW_INCLUDE_FBE_METADATA_DECRYPT := true
-# 之前一版猜的 TW_INCLUDE_FBE 宏名是错的（bootable_recovery 源码里根本没有
-# 这个宏），这里已经改成上面三个真实存在、两份参考树都在用的宏。
-#
-# recovery.fstab 里 /data 挂载参数是
-# fileencryption=aes-256-xts:aes-256-cts:v2+inlinecrypt_optimized，"v2" 对应
-# 下面这个策略版本号，两份参考树都显式设了这个值，必须跟 fstab 里的版本号
-# 对上：
-TW_USE_FSCRYPT_POLICY := 2
-#
-# 强制走标准 keymaster/keystore 服务解密（而不是某些树里用的厂商专属捷径，
-# 比如高通那份树里的 qcom_decrypt/qcom_decrypt_fbe，那个是骁龙平台专用的，
-# 展讯/Unisoc 平台没有对应的现成工具，所以咱们没法照抄这部分，只能走这条
-# 通用路径）：
-TW_FORCE_KEYMASTER_VER := true
+# ============================================================================
+# [2026-07-18 暂时关闭 - 为了塞进100MB分区先让mtp/fastbootd/adb跑起来]
+# 下面这一整块FBE解密相关的宏和额外库，先注释掉不编译。原厂PLATFORM段
+# 已经占了80.6MB，只给RECOVERY段留了不到20MB，这些crypto相关的东西
+# （尤其是下面那个keystore2，是Rust编的守护进程，体积不小）必须先让路。
+# 等mtp/fastbootd/adb跑通、确认实际RECOVERY段大小之后，如果还有空间富余，
+# 再把这块取消注释加回来验证"设置不保存"问题。
+# TW_INCLUDE_CRYPTO := true
+# TW_INCLUDE_CRYPTO_FBE := true
+# TW_INCLUDE_FBE_METADATA_DECRYPT := true
+# TW_USE_FSCRYPT_POLICY := 2
+# TW_FORCE_KEYMASTER_VER := true
+# ============================================================================
 #
 # recovery.fstab 里已经确认 /vendor 是从真机 vendor 分区 first_stage_mount
 # 挂载的（不是自己现打包的），也就是说只要上面 BOARD_VENDOR_RAMDISK_FRAGMENTS
@@ -279,10 +303,10 @@ TW_FORCE_KEYMASTER_VER := true
 # 需要能链接到它们。TARGET_RECOVERY_DEVICE_MODULES 负责让编译系统把它们编进
 # recovery 产物，TW_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES 负责把编出来的
 # .so 从 system 目录"搬"进 recovery ramdisk 实际会用到的路径。
-TARGET_RECOVERY_DEVICE_MODULES += \
-    android.hidl.base@1.0 \
-    android.system.keystore2
-
-TW_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
-    $(TARGET_OUT_SHARED_LIBRARIES)/android.hidl.base@1.0.so
+# TARGET_RECOVERY_DEVICE_MODULES += \
+#     android.hidl.base@1.0 \
+#     android.system.keystore2
+#
+# TW_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
+#     $(TARGET_OUT_SHARED_LIBRARIES)/android.hidl.base@1.0.so
 # ============================================================================
